@@ -6,6 +6,8 @@ Endpoints
   POST /webhooks/retell                call_started / call_ended / call_analyzed
   GET  /calls, /calls/{id}, /functions  tiny log viewer (JSON)
 """
+import asyncio
+import hmac
 import json
 import logging
 import os
@@ -15,7 +17,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from retell import Retell
 
 load_dotenv()
@@ -24,6 +26,8 @@ CLINIC_TZ = ZoneInfo(os.getenv("CLINIC_TZ", "America/Los_Angeles"))
 FAIL_MODE = os.getenv("FAIL_MODE", "none")
 VERIFY_FUNCTIONS = os.getenv("VERIFY_FUNCTIONS", "true").lower() == "true"
 DB_PATH = os.getenv("DB_PATH", "clinic.db")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+SLOW_SECONDS = float(os.getenv("SLOW_SECONDS", "12"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("clinic")
@@ -73,6 +77,15 @@ async def verified_body(request: Request, enforce: bool = True) -> dict:
     return json.loads(raw)
 
 
+def require_admin(request: Request) -> None:
+    """Bearer-token guard for the log viewer. Fails closed if ADMIN_TOKEN is unset."""
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="ADMIN_TOKEN not configured")
+    supplied = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(supplied.encode(), f"Bearer {ADMIN_TOKEN}".encode()):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 def log_function_call(call_id, name, args, result, ok, latency_ms, error=None) -> None:
     with db() as c:
         c.execute(
@@ -82,14 +95,19 @@ def log_function_call(call_id, name, args, result, ok, latency_ms, error=None) -
         )
 
 
-def open_slots(day: datetime) -> list[datetime]:
-    """Hourly slots 09:00-16:00 clinic time, Mon-Fri, minus anything booked."""
+def slot_grid(day: datetime) -> list[datetime]:
+    """Every bookable hourly slot 09:00-16:00 clinic time, Mon-Fri, booked or not."""
     if day.weekday() >= 5:
         return []
     tz = CLINIC_TZ
-    if FAIL_MODE == "tz_bug":  # INCIDENT: naive UTC instead of clinic time
+    if FAIL_MODE == "tz_bug":  # INCIDENT: UTC instead of clinic time
         tz = ZoneInfo("UTC")
-    slots = [datetime(day.year, day.month, day.day, h, 0, tzinfo=tz) for h in range(9, 17)]
+    return [datetime(day.year, day.month, day.day, h, 0, tzinfo=tz) for h in range(9, 17)]
+
+
+def open_slots(day: datetime) -> list[datetime]:
+    """The grid minus anything already booked."""
+    slots = slot_grid(day)
     with db() as c:
         taken = {r["slot_iso"] for r in c.execute("SELECT slot_iso FROM appointments")}
     return [s for s in slots if s.isoformat() not in taken]
@@ -99,9 +117,12 @@ def human(s: datetime) -> str:
     return s.strftime("%A %B %d at %I:%M %p").replace(" 0", " ")
 
 
-def apply_fail_mode() -> None:
+async def apply_fail_mode() -> None:
     if FAIL_MODE == "slow":
-        time.sleep(12)  # INCIDENT: exceeds the agent's function timeout
+        # INCIDENT: exceeds the agent's function timeout. Non-blocking on purpose: a slow
+        # dependency must not freeze the whole server. Note the handler still runs to
+        # completion afterwards, so book_appointment commits after Retell has timed out.
+        await asyncio.sleep(SLOW_SECONDS)
     elif FAIL_MODE == "error":
         raise RuntimeError("simulated upstream scheduling system failure")
 
@@ -114,12 +135,13 @@ async def check_availability(request: Request):
     args = body.get("args", {})
     t0 = time.time()
     try:
-        apply_fail_mode()
+        await apply_fail_mode()
         day = datetime.strptime(args["date"], "%Y-%m-%d")
         if day.date() < datetime.now(CLINIC_TZ).date():
             result = {"available": [], "message": "That date is in the past."}
         else:
-            slots = open_slots(day)
+            now = datetime.now(CLINIC_TZ)
+            slots = [s for s in open_slots(day) if s > now]
             result = {
                 "available": [human(s) for s in slots],
                 "slot_ids": [s.isoformat() for s in slots],
@@ -140,15 +162,27 @@ async def book_appointment(request: Request):
     args = body.get("args", {})
     t0 = time.time()
     try:
-        apply_fail_mode()
+        await apply_fail_mode()
         slot = args["slot_id"]
+        try:
+            when = datetime.fromisoformat(slot)
+        except (TypeError, ValueError):
+            when = None
+        if when is None or when.tzinfo is None or slot not in {s.isoformat() for s in slot_grid(when)}:
+            result = {"booked": False, "message": "Invalid slot_id. Call check_availability again and pass an exact slot_id from its result."}
+            log_function_call(call_id, "book_appointment", args, result, False, int((time.time() - t0) * 1000), "invalid slot_id")
+            return result
+        if when <= datetime.now(CLINIC_TZ):
+            result = {"booked": False, "message": "That time has already passed. Offer another time."}
+            log_function_call(call_id, "book_appointment", args, result, False, int((time.time() - t0) * 1000), "slot in the past")
+            return result
         with db() as c:
             try:
                 c.execute(
                     "INSERT INTO appointments(call_id,patient,slot_iso,reason,created_at) VALUES (?,?,?,?,?)",
                     (call_id, args["patient_name"], slot, args.get("reason", ""), int(time.time())),
                 )
-                result = {"booked": True, "message": f"Booked {args['patient_name']} for {human(datetime.fromisoformat(slot))}."}
+                result = {"booked": True, "message": f"Booked {args['patient_name']} for {human(when)}."}
             except sqlite3.IntegrityError:
                 result = {"booked": False, "message": "That slot was just taken. Offer another time."}
         log_function_call(call_id, "book_appointment", args, result, True, int((time.time() - t0) * 1000))
@@ -195,7 +229,7 @@ async def retell_webhook(request: Request, background: BackgroundTasks):
 
 
 # ---------- log viewer ----------
-@app.get("/calls")
+@app.get("/calls", dependencies=[Depends(require_admin)])
 def list_calls(limit: int = 20):
     with db() as c:
         rows = c.execute(
@@ -204,7 +238,7 @@ def list_calls(limit: int = 20):
     return [dict(r) for r in rows]
 
 
-@app.get("/calls/{call_id}")
+@app.get("/calls/{call_id}", dependencies=[Depends(require_admin)])
 def get_call(call_id: str):
     with db() as c:
         call = c.execute("SELECT call_id,status,duration_ms,disconnection_reason,transcript,summary,sentiment,call_successful FROM calls WHERE call_id=?", (call_id,)).fetchone()
@@ -214,7 +248,7 @@ def get_call(call_id: str):
     return {"call": dict(call), "function_calls": [dict(f) for f in fns]}
 
 
-@app.get("/functions")
+@app.get("/functions", dependencies=[Depends(require_admin)])
 def list_function_calls(limit: int = 30):
     with db() as c:
         rows = c.execute("SELECT * FROM function_calls ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

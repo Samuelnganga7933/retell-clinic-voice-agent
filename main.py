@@ -31,10 +31,19 @@ DB_PATH = os.getenv("DB_PATH", "clinic.db")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 SLOW_SECONDS = float(os.getenv("SLOW_SECONDS") or "12")
 FUNCTION_DEADLINE_S = float(os.getenv("FUNCTION_DEADLINE_S") or "5")
+# Which function the FAIL_MODE incident hits: all | check_availability | book_appointment
+FAIL_TARGET = os.getenv("FAIL_TARGET") or "all"
+if FAIL_TARGET not in {"all", "check_availability", "book_appointment"}:
+    # A typo here would silently disable the drill, so fail at startup instead.
+    raise ValueError(f"FAIL_TARGET must be all, check_availability or book_appointment, got {FAIL_TARGET!r}")
 HANDLED_EVENTS = {"call_started", "call_ended", "call_analyzed"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("clinic")
+log.info(
+    "drill config: FAIL_MODE=%s FAIL_TARGET=%s SLOW_SECONDS=%g FUNCTION_DEADLINE_S=%g",
+    FAIL_MODE, FAIL_TARGET, SLOW_SECONDS, FUNCTION_DEADLINE_S,
+)
 retell = Retell(api_key=API_KEY)
 app = FastAPI(title="Retell clinic demo", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -141,7 +150,10 @@ def human(s: datetime) -> str:
     return s.strftime("%A %B %d at %I:%M %p").replace(" 0", " ")
 
 
-async def apply_fail_mode() -> None:
+async def apply_fail_mode(fn: str = "") -> None:
+    """Inject the FAIL_MODE incident, but only into the function named by FAIL_TARGET."""
+    if FAIL_TARGET != "all" and FAIL_TARGET != fn:
+        return
     if FAIL_MODE == "slow":
         # INCIDENT: exceeds the agent's function timeout. Non-blocking on purpose, so a slow
         # dependency cannot freeze the whole server.
@@ -164,7 +176,7 @@ async def check_availability(request: Request):
             result = {"available": [], "message": "Invalid date. Ask for the day again and use YYYY-MM-DD."}
             log_function_call(call_id, "check_availability", args, result, False, t0, "invalid date")
             return result
-        await apply_fail_mode()
+        await apply_fail_mode("check_availability")
         if day.date() < datetime.now(CLINIC_TZ).date():
             result = {"available": [], "message": "That date is in the past."}
         else:
@@ -213,7 +225,7 @@ async def book_appointment(request: Request):
         if when <= datetime.now(CLINIC_TZ):
             return reject_booking(call_id, args, t0, "That time has already passed. Offer another time.", "slot in the past")
 
-        await apply_fail_mode()
+        await apply_fail_mode("book_appointment")
         # Retell stops waiting after its function timeout, so a booking committed after
         # that point would exist while the caller was told it failed.
         if FUNCTION_DEADLINE_S > 0 and time.time() - t0 > FUNCTION_DEADLINE_S:
@@ -240,7 +252,7 @@ async def book_appointment(request: Request):
         return {"booked": False, "message": "Scheduling system unavailable. Offer a callback."}
 
 
-# ---------- webhook ----------
+# ---------- webhooks ----------
 def store_event(event: str, call: dict) -> bool:
     """Persist one webhook event. Returns False if this (event, call_id) was already stored."""
     cid = call["call_id"]

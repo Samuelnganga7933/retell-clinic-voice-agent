@@ -1,8 +1,8 @@
 # Retell clinic voice agent
 
-Backend for a voice receptionist built on [Retell AI](https://www.retellai.com). The agent answers calls for a fictional dental clinic and books appointments through two custom functions. A signed webhook receiver stores every call, and a small authenticated log viewer shows what happened on each one.
+A voice receptionist backend for a fictional dental clinic, built on [Retell AI](https://www.retellai.com). The agent answers calls, checks open times, and books appointments through signed custom functions. A signed webhook receiver stores every call, and an authenticated log viewer shows what happened.
 
-The project is built around the work a support engineer does with a customer: connecting the voice agent to their systems, then finding the cause when a call goes wrong.
+The project is a support-engineering exercise: connect a voice agent to a real system, then find the cause when a call goes wrong.
 
 ```mermaid
 flowchart LR
@@ -14,63 +14,52 @@ flowchart LR
     DB --> Viewer["/calls, /functions<br/>bearer token"]
 ```
 
-## Features
+## What it demonstrates
 
-- Custom functions `check_availability` and `book_appointment` with strict input validation and messages the agent can act on when something fails
-- Signature verification on webhooks and function calls, using the raw request body
-- Webhooks are persisted before they are acknowledged with a 204, and duplicate deliveries are ignored
-- A deadline on bookings, so a request Retell has already given up on is not committed
-- Every function call is logged with arguments, result, latency and error
-- Log viewer endpoints protected by a bearer token that fails closed when unset
+- Signed function calls and webhooks, with signature verification against the raw body
+- Strict slot validation: exact `slot_id`, clinic time zone, weekdays only, no past times
+- A booking deadline that refuses to commit work Retell has already given up on
+- Webhook persistence before acknowledgement, with duplicate delivery protection
+- Every function call logged with arguments, result, latency, and error
+- A bearer-token log viewer that fails closed when no token is configured
 - Failure switches for practising incident response: slow lookups, upstream errors, time zone bugs
 
 ## Screenshots
 
-Local test suite:
+The local test suite, with no network calls and a throwaway database per test:
 
-![Test suite](docs/img/tests.png)
+<img src="docs/img/tests.png" alt="pytest output showing 35 passing tests" width="720">
 
-Log viewer after a simulated call. The call was produced by the signed-request test harness, not by a live agent:
+A call record and its function calls from the log viewer. This fixture was produced by the signed-request test harness, not by a live agent:
 
-![Call log](docs/img/call-log.png)
+<img src="docs/img/call-log.png" alt="JSON call record showing a transcript, a booking, and function call latency" width="720">
 
 ## Quick start
 
 Requires Python 3.9 or newer. No Docker needed.
 
 ```bash
-git clone https://github.com/samuelnganga7933/retell-clinic-voice-agent.git
-cd retell-clinic-voice-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Edit `.env`: set `RETELL_API_KEY` to the key that shows the webhook badge in the Retell dashboard, and generate an admin token:
+Edit `.env`:
 
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-```
+- `RETELL_API_KEY`: the key that shows the **webhook** badge in Retell. Other keys will fail signature verification.
+- `ADMIN_TOKEN`: generate one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
-Then run the tests and start the server:
+Run the tests, then start the server:
 
 ```bash
 pytest -q
-uvicorn main:app --reload --port 8000
+uvicorn main:app --port 8000
 ```
 
-Check `http://localhost:8000/health`, then expose the server so Retell can reach it:
+Check `http://localhost:8000/health`. It returns `{"ok":true}`.
 
-```bash
-ngrok http 8000
-```
-
-Retell blocks requests to localhost, so the dashboard needs the public HTTPS address from ngrok. The free address changes on every restart.
-
-## Connect it to Retell
-
-[docs/retell-setup.md](docs/retell-setup.md) walks through creating the agent, the prompt, the function schemas, the webhook and a browser test call. A phone number is not needed: Retell's web call test runs in the browser.
+Expose port `8000` over HTTPS with any tunnel. The free address changes whenever the tunnel restarts, so update both function URLs and the webhook URL together when it does. A request that never reaches the app leaves no server log to debug.
 
 ## Configuration
 
@@ -82,8 +71,22 @@ Retell blocks requests to localhost, so the dashboard needs the public HTTPS add
 | `VERIFY_FUNCTIONS` | Verify signatures on function calls too | `true` |
 | `FUNCTION_DEADLINE_S` | Seconds a booking may take before it is refused. `0` disables | `5` |
 | `FAIL_MODE` | `none`, `slow`, `error` or `tz_bug` | `none` |
+| `FAIL_TARGET` | Which function the drill hits: `all`, `check_availability` or `book_appointment` | `all` |
 | `SLOW_SECONDS` | Delay used by `slow` mode | `12` |
 | `DB_PATH` | SQLite file | `clinic.db` |
+
+`.env` is read once at import time. Restart the server after changing it.
+
+## Agent contract
+
+The system prompt, custom function schemas, webhook contract, and timeout rules are in [docs/agent-contract.md](docs/agent-contract.md).
+
+The short version:
+
+- `check_availability` takes a `YYYY-MM-DD` date and returns human-readable times plus exact `slot_ids`.
+- `book_appointment` takes an exact `slot_id`, a patient name, and a reason.
+- Both functions and `/webhooks/retell` require a valid `X-Retell-Signature`.
+- Keep **Payload: args only** off so the handler can read the call ID.
 
 ## Endpoints
 
@@ -92,40 +95,82 @@ Retell blocks requests to localhost, so the dashboard needs the public HTTPS add
 | `POST /functions/check_availability` | Retell signature | Open slots for a `YYYY-MM-DD` date |
 | `POST /functions/book_appointment` | Retell signature | Book an exact `slot_id` for a patient |
 | `POST /webhooks/retell` | Retell signature | Store `call_started`, `call_ended`, `call_analyzed` |
-| `GET /calls`, `GET /calls/{id}` | Bearer token | Calls, transcripts and their function calls |
+| `GET /calls`, `GET /calls/{id}` | Bearer token | Calls, transcripts, and their function calls |
 | `GET /functions` | Bearer token | Recent function calls with latency and errors |
 | `GET /health` | none | Liveness check |
 
-## Incident drills
+Unsigned requests are rejected with `401 {"detail":"invalid signature"}`. That is the expected result, not a failure.
 
-Set `FAIL_MODE` in `.env` and restart the server.
+## Failure drills
+
+Set `FAIL_MODE` and optionally `FAIL_TARGET` in `.env`, then restart the server.
 
 | Mode | What the caller experiences | Where to look |
 |---|---|---|
-| `slow` | Long silence, then an apology or failed tool call | `latency_ms` in `/functions`, Retell's call log, the `appointments` table |
+| `slow` | Long silence, then an apology or failed tool call | `latency_ms` in `/functions`, the Retell call log, the `appointments` table |
 | `error` | The agent says scheduling is unavailable and offers a callback | `error` column, server traceback |
 | `tz_bug` | Nothing visible on the call | Offset on `slot_id` values compared with `CLINIC_TZ` |
 
-A worked example is in [docs/post-incident-ghost-booking.md](docs/post-incident-ghost-booking.md).
+A worked example, including the before-and-after evidence, is in [docs/post-incident-ghost-booking.md](docs/post-incident-ghost-booking.md).
+
+Set `FAIL_TARGET=book_appointment` for the ghost-booking drill. With the default `all`, `check_availability` is slowed too, so the agent times out before it can offer any times.
+
+## Testing
+
+```bash
+pytest -q
+```
+
+The suite has 35 tests and makes no network calls. It forges valid Retell signatures and uses a temporary SQLite file per test. Coverage includes:
+
+- unsigned function calls and webhooks rejected with `401`
+- valid signatures accepted, including the raw-body requirement
+- weekends, past dates, malformed dates, off-grid times, and missing names rejected
+- the late-booking deadline: committed when disabled, refused when enforced
+- slow mode not blocking the rest of the server
+- webhook acknowledgement with `204`, duplicate suppression, and `call_analyzed` updates
+- the log viewer requiring a token, and failing closed when the token is unset
+- API documentation routes remaining disabled
+
+## What broke while building this
+
+These are real failures from building and testing the agent, kept here because they are the work.
+
+- **401 on Retell's own requests.** The key in `.env` was a valid Retell key but not the one with the webhook badge, so signed traffic was rejected while unsigned probes were also correctly rejected. Using the webhook key and restarting the server fixed it. `.env` is read at import time.
+- **A stale server on port 8000.** A leftover `http.server` answered health checks while uvicorn was not actually serving. The `drill config: ...` startup line is now the first thing to check before trusting a call.
+- **Tunnel address drift.** Free tunnels change host on restart. The dashboard kept pointing at a dead address, so requests never reached the app and there was no server log to debug. Update all three URLs together.
+- **Empty `args`.** Turning on **Payload: args only** sends the arguments bare. The handler reads `body["args"]`, so every call looked like an invalid date. Keep it off.
+- **A drill that slowed the wrong function.** `FAIL_TARGET` defaults to `all`; a missing value made `check_availability` take 12 seconds, so the agent timed out before offering times. Set it explicitly.
+- **Timeout units.** Retell's function timeout is in seconds. An early draft of the setup notes said `5000` ms; `5` is correct.
+
+## Security notes
+
+- Signatures are verified against the raw request body on both function calls and webhooks.
+- The log viewer contains transcripts and patient names, so it requires a bearer token and fails closed (`503`) when `ADMIN_TOKEN` is unset.
+- FastAPI's `/docs`, `/redoc`, and `/openapi.json` routes are disabled.
+- `.env` and `*.db` are ignored. No key or patient database belongs in the repository.
+- A public tunnel exposes the app to the internet. Use test data only, and stop the tunnel when you are done.
 
 ## Design notes
 
-- Signatures are checked against the raw body. Re-serialising parsed JSON changes the bytes and breaks the hash.
-- Slot IDs must match a generated slot exactly. Free text, off-grid times, weekends and past times are rejected, so a model error cannot create a bad appointment.
-- Webhook events are keyed by event and call ID. Retell retries failed deliveries, so the same event can arrive more than once.
-- `call_analyzed` arrives after `call_ended` and updates the same record.
-- The log viewer contains transcripts and patient names, so it needs a token, and the API documentation routes are disabled.
+- **Raw body, not parsed JSON.** Re-serialising changes the bytes and breaks the HMAC.
+- **Exact slot IDs.** The handler regenerates the slot grid and rejects anything that does not match. A model error cannot create a weekend, past, or off-grid appointment.
+- **Idempotent webhooks.** Events are keyed by `(event, call_id)`. Retell retries failed deliveries, so the same event can arrive more than once.
+- **Deadline below the platform timeout.** The handler measures its own elapsed time and refuses to commit after `FUNCTION_DEADLINE_S`. The write is what gets refused; the request itself has already been abandoned by the caller.
+- **Non-blocking delay.** The `slow` drill uses `asyncio.sleep`, so one slow function does not freeze webhooks or other calls.
+- **Latency is part of the record.** Every function call stores `ok`, `latency_ms`, and an error string, which is what makes disagreements between the platform log and the server log debuggable.
 
 ## Project layout
 
-```
-main.py                  application
-tests/test_api.py        tests with forged Retell signatures
-docs/retell-setup.md     agent, prompt, functions and webhook configuration
-docs/post-incident-*.md  incident write-up
-docs/img/                screenshots
+```text
+main.py                       application
+tests/test_api.py             tests with forged Retell signatures
+docs/agent-contract.md        prompt, tool schemas, webhook and timeout contract
+docs/post-incident-*.md       incident write-up with before/after evidence
+docs/img/                     screenshots
+.github/workflows/tests.yml   CI test run
 ```
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

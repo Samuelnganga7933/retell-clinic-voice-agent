@@ -1,5 +1,7 @@
 .env
 *.db
+*.log
+docs/evidence/
 __pycache__/
 .pytest_cache/
 .venv/

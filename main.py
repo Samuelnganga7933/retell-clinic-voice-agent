@@ -288,6 +288,16 @@ async def retell_webhook(request: Request):
 
 
 # ---------- log viewer ----------
+def decode_function_row(row: sqlite3.Row) -> dict:
+    """Return a function_calls row with the stored JSON strings turned back into objects."""
+    out = dict(row)
+    for key in ("args", "result"):
+        if out.get(key):
+            out[key] = json.loads(out[key])
+    out["ok"] = bool(out["ok"])
+    return out
+
+
 @app.get("/calls", dependencies=[Depends(require_admin)])
 def list_calls(limit: int = Query(20, ge=1, le=200)):
     with db() as c:
@@ -308,14 +318,14 @@ def get_call(call_id: str):
             (call_id,)).fetchall()
     if not call:
         raise HTTPException(404, "call not found")
-    return {"call": dict(call), "function_calls": [dict(f) for f in fns]}
+    return {"call": dict(call), "function_calls": [decode_function_row(f) for f in fns]}
 
 
 @app.get("/functions", dependencies=[Depends(require_admin)])
 def list_function_calls(limit: int = Query(30, ge=1, le=200)):
     with db() as c:
         rows = c.execute("SELECT * FROM function_calls ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+    return [decode_function_row(r) for r in rows]
 
 
 @app.get("/health")

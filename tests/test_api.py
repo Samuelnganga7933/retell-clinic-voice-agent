@@ -188,6 +188,9 @@ def test_webhook_acknowledges_with_204_and_stores_call():
     assert post("/webhooks/retell", call_payload()).status_code == 204
     d = client.get("/calls/c1", headers=ADMIN).json()
     assert d["call"]["summary"] == "booked" and len(d["function_calls"]) == 1
+    fn = d["function_calls"][0]
+    assert fn["name"] == "check_availability" and fn["ok"] is True
+    assert fn["args"] == {"date": MONDAY} and fn["result"]["slot_ids"]
 
 
 def test_duplicate_webhook_is_ignored():

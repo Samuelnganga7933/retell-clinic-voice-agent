@@ -1,6 +1,10 @@
 # Retell clinic voice agent
 
+[![tests](https://github.com/Samuelnganga7933/retell-clinic-voice-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/Samuelnganga7933/retell-clinic-voice-agent/actions/workflows/tests.yml)
+
 A voice receptionist backend for a fictional dental clinic, built on [Retell AI](https://www.retellai.com). The agent answers calls, checks open times, and books appointments through signed custom functions. A signed webhook receiver stores every call, and an authenticated log viewer shows what happened.
+
+The prompt, both tool contracts, and the backend were written from scratch. Retell provides the speech and LLM runtime; everything the agent calls is this repository.
 
 The project is a support-engineering exercise: connect a voice agent to a real system, then find the cause when a call goes wrong.
 
@@ -13,6 +17,17 @@ flowchart LR
     Webhook --> DB
     DB --> Viewer["/calls, /functions<br/>bearer token"]
 ```
+
+## Scope
+
+| Built here | Provided by Retell | Not built |
+|---|---|---|
+| System prompt, booking flow, and tool contracts | Speech recognition, LLM, and voice | PSTN/SIP telephony |
+| `check_availability` and `book_appointment` | Call orchestration | Carrier phone numbers |
+| FastAPI backend, SQLite schema, signature verification | Browser test call | Call transfer |
+| Webhook receiver, duplicate suppression, log viewer | | |
+| Booking deadline and failure drills | | |
+| Tests and incident write-up | | |
 
 ## What it demonstrates
 

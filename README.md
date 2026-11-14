@@ -14,7 +14,7 @@ Caller -> Retell agent --(custom function POST)--> /functions/*   -> SQLite (slo
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # paste your Retell API key (the one with the webhook badge)
-pytest -q                   # 3 local tests, no Retell needed
+pytest -q                   # local tests, no Retell needed; each test uses a throwaway DB
 uvicorn main:app --reload --port 8000
 ngrok http 8000             # copy the https URL
 ```
@@ -42,10 +42,12 @@ Rules:
 
 ## Viewing logs
 - `GET /calls`, `GET /calls/{call_id}` (transcript + every function call with latency and error), `GET /functions`
+- These contain transcripts and patient names, so they require `Authorization: Bearer $ADMIN_TOKEN` (set `ADMIN_TOKEN` in `.env`; unset means 503). Example: `curl -H "Authorization: Bearer $ADMIN_TOKEN" https://<ngrok>/calls`
+- `book_appointment` rejects any `slot_id` that isn't an exact slot from `check_availability` (wrong format, off-grid, weekend, or in the past) and logs it as a failed call with the reason.
 
 ## Incident drills (`FAIL_MODE` in .env, restart the server after changing)
 | Mode | Symptom on the call | Where to look |
 |---|---|---|
-| `slow` | Long silence, agent apologises or tool call fails | `latency_ms` in `/functions`, Retell timeout setting |
+| `slow` | Long silence, agent apologises or tool call fails. The handler still finishes later, so a booking can land after the caller was told it failed (ghost booking) | `latency_ms` in `/functions` vs the call's timeline in Retell, `appointments` table |
 | `error` | Agent says scheduling is unavailable | `error` column, server traceback |
 | `tz_bug` | Agent offers times that are wrong for the clinic | `slot_ids` offset vs `CLINIC_TZ`, transcript |

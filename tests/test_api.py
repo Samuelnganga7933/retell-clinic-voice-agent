@@ -7,6 +7,8 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 
@@ -174,6 +176,37 @@ def test_late_booking_commits_without_deadline(monkeypatch):
 def test_tz_bug_changes_the_stored_offset(monkeypatch):
     monkeypatch.setattr(main, "FAIL_MODE", "tz_bug")
     assert check(MONDAY).json()["slot_ids"][0].endswith("+00:00")
+
+
+def test_fail_target_limits_the_drill_to_one_function(monkeypatch):
+    monkeypatch.setattr(main, "FAIL_MODE", "error")
+    monkeypatch.setattr(main, "FAIL_TARGET", "check_availability")
+    unavailable = check(MONDAY).json()
+    assert unavailable["available"] == [] and "unavailable" in unavailable["message"]
+    assert book(SLOT).json()["booked"] is True
+
+    monkeypatch.setattr(main, "FAIL_TARGET", "book_appointment")
+    assert check(MONDAY).json()["slot_ids"]
+    failed = book(SLOT, call_id="c2").json()
+    assert failed["booked"] is False and "callback" in failed["message"]
+
+
+def test_startup_rejects_unknown_fail_target(tmp_path):
+    env = os.environ.copy()
+    env.update({
+        "FAIL_TARGET": "book_apointment",
+        "DB_PATH": str(tmp_path / "startup.db"),
+        "RETELL_API_KEY": "key_test123",
+    })
+    result = subprocess.run(
+        [sys.executable, "-c", "import main"],
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "FAIL_TARGET must be all, check_availability or book_appointment" in result.stderr
 
 
 # ---------- webhooks ----------

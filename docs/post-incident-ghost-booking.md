@@ -50,7 +50,7 @@ Two browser test calls against the running agent, with the Retell function timeo
 | `check_availability` | `ok=1`, `latency_ms=6` | `ok=1`, `latency_ms=2` |
 | `book_appointment` | `ok=1`, `latency_ms=12006` | `ok=0`, `latency_ms=12001` |
 | Error | none | `deadline of 4s exceeded, not committed` |
-| `appointments` | 1 row: Kevin De Bruin, Nov 17 at 1:00 PM | no row |
+| `appointments` | 1 row: Test Patient, Nov 17 at 1:00 PM | no row |
 | Agent told the caller | booking failed | booking failed |
 | Webhook events | `call_started`, `call_ended`, `call_analyzed` stored | same |
 

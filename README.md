@@ -43,11 +43,19 @@ flowchart LR
 
 The local test suite, with no network calls and a throwaway database per test:
 
-<img src="docs/img/tests.png" alt="pytest output showing 35 passing tests" width="720">
+<img src="docs/img/tests.png" alt="pytest output showing the test suite passing" width="720">
 
 A call record and its function calls from the log viewer. This fixture was produced by the signed-request test harness, not by a live agent:
 
 <img src="docs/img/call-log.png" alt="JSON call record showing a transcript, a booking, and function call latency" width="720">
+
+A live call transcript from the `tz_bug` drill. The `book_appointment` call stores `2026-11-18T10:00:00+00:00`, which is 2:00 AM in the clinic's time zone. Names are redacted:
+
+<img src="docs/img/live-call-transcript.png" alt="Retell call transcript showing a booking tool call with a UTC slot_id" width="720">
+
+A live call summary from the deadline drill. The agent reports the booking as unsuccessful after the function times out. Names are redacted:
+
+<img src="docs/img/live-call-summary.png" alt="Retell call summary showing an unsuccessful booking attempt" width="720">
 
 ## Quick start
 
@@ -130,6 +138,8 @@ A worked example, including the before-and-after evidence, is in [docs/post-inci
 
 Set `FAIL_TARGET=book_appointment` for the ghost-booking drill. With the default `all`, `check_availability` is slowed too, so the agent times out before it can offer any times.
 
+`FAIL_TARGET` only applies to `slow` and `error`. `tz_bug` ignores it because both functions build their slots from the same `slot_grid`, so the wrong offset appears on both paths.
+
 ### Live drill results
 
 Browser test calls against the running agent on 2026-11-15. Every drill used a five-second Retell function timeout; the slow drills used `SLOW_SECONDS=12`.
@@ -148,12 +158,13 @@ Browser test calls against the running agent on 2026-11-15. Every drill used a f
 pytest -q
 ```
 
-The suite has 35 tests and makes no network calls. It forges valid Retell signatures and uses a temporary SQLite file per test. Coverage includes:
+The suite makes no network calls. It forges valid Retell signatures and uses a temporary SQLite file per test. Coverage includes:
 
 - unsigned function calls and webhooks rejected with `401`
 - valid signatures accepted, including the raw-body requirement
 - weekends, past dates, malformed dates, off-grid times, and missing names rejected
 - the late-booking deadline: committed when disabled, refused when enforced
+- `FAIL_TARGET` limiting the drill to one function, and rejecting an unknown value at startup
 - slow mode not blocking the rest of the server
 - webhook acknowledgement with `204`, duplicate suppression, and `call_analyzed` updates
 - the log viewer requiring a token, and failing closed when the token is unset

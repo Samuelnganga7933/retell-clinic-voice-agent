@@ -59,7 +59,7 @@ A live call summary from the deadline drill. The agent reports the booking as un
 
 ## Quick start
 
-Requires Python 3.9 or newer. No Docker needed.
+Requires Python 3.10 or newer. No Docker needed.
 
 ```bash
 python3 -m venv .venv

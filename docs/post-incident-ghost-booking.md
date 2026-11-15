@@ -39,9 +39,28 @@ Evidence from the two configurations:
 
 The first row is the problem: the server log says the call succeeded while the caller was told it failed. When logs on both sides disagree, compare the timestamps before assuming either side is wrong.
 
-## The same drill against the live agent
+## Live evidence
 
-Use a delayed function and a platform timeout of five seconds:
+Two browser test calls against the running agent, with the Retell function timeout set to five seconds:
+
+| | Before | After |
+|---|---|---|
+| Configuration | `SLOW_SECONDS=12`, `FUNCTION_DEADLINE_S=0` | `SLOW_SECONDS=12`, `FUNCTION_DEADLINE_S=4` |
+| Call ID | `call_ed63c3649180d22e9650e8c8761` | `call_5634cdd5ce5d40cb5bdb7e588e6` |
+| `check_availability` | `ok=1`, `latency_ms=6` | `ok=1`, `latency_ms=2` |
+| `book_appointment` | `ok=1`, `latency_ms=12006` | `ok=0`, `latency_ms=12001` |
+| Error | none | `deadline of 4s exceeded, not committed` |
+| `appointments` | 1 row: Kevin De Bruin, Nov 17 at 1:00 PM | no row |
+| Agent told the caller | booking failed | booking failed |
+| Webhook events | `call_started`, `call_ended`, `call_analyzed` stored | same |
+
+Both calls sound the same: Retell stops waiting after five seconds, the agent apologises and offers a callback. The difference is in the database. The before run committed a booking the caller was told did not exist. The after run refused it.
+
+The after run still shows `latency_ms=12001`, because the handler waits for the slow work before deciding. The fix refuses the write; it does not cancel the request.
+
+### Reproducing it
+
+Set the before configuration and restart the server:
 
 ```text
 FAIL_MODE=slow
@@ -50,20 +69,12 @@ SLOW_SECONDS=12
 FUNCTION_DEADLINE_S=0
 ```
 
-Call, ask for a slot, and pick it. The agent offers times normally, goes quiet after the choice, then reports a tool error and offers a callback. About twelve seconds after the request started, the server commits the booking:
+Call, ask for a slot, and pick it. About twelve seconds after the request started, the server commits the booking. Then set `FUNCTION_DEADLINE_S=4`, restart, and repeat on a different slot. Use a different slot for the second run, because the first run's ghost booking occupies its slot.
 
 ```bash
 sqlite3 clinic.db "select call_id, patient, slot_iso, datetime(created_at,'unixepoch') from appointments"
-sqlite3 clinic.db "select name, ok, latency_ms, error from function_calls order by id desc limit 2"
+sqlite3 clinic.db "select call_id, name, ok, latency_ms, error from function_calls order by id desc limit 4"
 ```
-
-Then set `FUNCTION_DEADLINE_S=4`, restart the server, and repeat on a different slot. The call sounds the same. The server still takes about twelve seconds, but this time it refuses the late write:
-
-- `appointments` has no new row for that call.
-- `function_calls` has `ok=0` and error `deadline of 4s exceeded, not committed`.
-- `latency_ms` is still around `12000`, because the handler waits for the slow work before deciding.
-
-Use a different slot for the second run. The first run's ghost booking occupies its slot.
 
 ## Root cause
 

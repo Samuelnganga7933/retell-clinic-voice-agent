@@ -130,6 +130,18 @@ A worked example, including the before-and-after evidence, is in [docs/post-inci
 
 Set `FAIL_TARGET=book_appointment` for the ghost-booking drill. With the default `all`, `check_availability` is slowed too, so the agent times out before it can offer any times.
 
+### Live drill results
+
+Browser test calls against the running agent on 2026-11-15. Every drill used a five-second Retell function timeout; the slow drills used `SLOW_SECONDS=12`.
+
+| Drill | Call ID | Result |
+|---|---|---|
+| Baseline | `call_8405defc68ff6b9c04387f07da0` | booked, `ok=1`, `3ms`, row at Nov 17 2:00 PM |
+| `slow`, deadline `0` | `call_ed63c3649180d22e9650e8c8761` | `ok=1`, `12006ms`, ghost row at Nov 17 1:00 PM |
+| `slow`, deadline `4` | `call_5634cdd5ce5d40cb5bdb7e588e6` | `ok=0`, `12001ms`, no row, deadline error |
+| `error` | `call_fb014f3302a40d920939ca6ba56` | `ok=0`, `0ms`, upstream error, no row |
+| `tz_bug` | `call_110fd01bfc55282ab8d2f3df67b` | booked, `slot_id` ended `+00:00`; 10:00 UTC is 2:00 AM in the clinic's timezone |
+
 ## Testing
 
 ```bash
